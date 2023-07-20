@@ -1,3 +1,5 @@
+# TODO: make a straight-up random crop (w/out any resizing, unless the image is
+# too small (or even raise an error in that case)!)
 from abc import ABCMeta, abstractmethod
 from dataclasses import replace
 from typing import Optional, Callable, TYPE_CHECKING, Tuple, Type
@@ -19,14 +21,15 @@ if TYPE_CHECKING:
     from ..reader import Reader
 
 IMAGE_MODES = Dict()
-IMAGE_MODES['jpg'] = 0
-IMAGE_MODES['raw'] = 1
+IMAGE_MODES["jpg"] = 0
+IMAGE_MODES["raw"] = 1
 
 
 def encode_jpeg(numpy_image, quality):
     numpy_image = cv2.cvtColor(numpy_image, cv2.COLOR_RGB2BGR)
-    success, result = cv2.imencode('.jpg', numpy_image,
-                                   [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    success, result = cv2.imencode(
+        ".jpg", numpy_image, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    )
 
     if not success:
         raise ValueError("Impossible to encode image in jpeg")
@@ -80,18 +83,34 @@ def get_center_crop(height, width, _, ratio):
 
     return delta_h, delta_w, c, c
 
+def get_random_crop_alt(height_in, width_in, height_out, width_out):
+    i, j, h, w = None, None, None, None
+    if (height_in >= height_out):
+        i = int(np.random.uniform(0, height_in-height_out +1))
+        h = height_out
+    if  (width_in >= width_out):
+        j = int(np.random.uniform(0, width_in-width_out +1))
+        w = width_out
+    if i == None:
+        i, h = 0, height_out
+    if j == None:
+        j, w = 0, width_out
+    return i, j, h, w
 
 class SimpleRGBImageDecoder(Operation):
     """Most basic decoder for the :class:`~ffcv.fields.RGBImageField`.
 
     It only supports dataset with constant image resolution and will simply read (potentially decompress) and pass the images as is.
     """
+
     def __init__(self):
         super().__init__()
 
-    def declare_state_and_memory(self, previous_state: State) -> Tuple[State, AllocationQuery]:
-        widths = self.metadata['width']
-        heights = self.metadata['height']
+    def declare_state_and_memory(
+        self, previous_state: State
+    ) -> Tuple[State, AllocationQuery]:
+        widths = self.metadata["width"]
+        heights = self.metadata["height"]
         max_width = widths.max()
         max_height = heights.max()
         min_height = heights.min()
@@ -103,20 +122,19 @@ instead."""
             raise TypeError(msg)
 
         biggest_shape = (max_height, max_width, 3)
-        my_dtype = np.dtype('<u1')
+        my_dtype = np.dtype("<u1")
 
         return (
-            replace(previous_state, jit_mode=True,
-                    shape=biggest_shape, dtype=my_dtype),
-            AllocationQuery(biggest_shape, my_dtype)
+            replace(previous_state, jit_mode=True, shape=biggest_shape, dtype=my_dtype),
+            AllocationQuery(biggest_shape, my_dtype),
         )
 
     def generate_code(self) -> Callable:
         mem_read = self.memory_read
         imdecode_c = Compiler.compile(imdecode)
 
-        jpg = IMAGE_MODES['jpg']
-        raw = IMAGE_MODES['raw']
+        jpg = IMAGE_MODES["jpg"]
+        raw = IMAGE_MODES["raw"]
         my_range = Compiler.get_iterator()
         my_memcpy = Compiler.compile(memcpy)
 
@@ -124,16 +142,28 @@ instead."""
             for dst_ix in my_range(len(batch_indices)):
                 source_ix = batch_indices[dst_ix]
                 field = metadata[source_ix]
-                image_data = mem_read(field['data_ptr'], storage_state)
-                height, width = field['height'], field['width']
+                image_data = mem_read(field["data_ptr"], storage_state)
+                height, width = field["height"], field["width"]
 
-                if field['mode'] == jpg:
-                    imdecode_c(image_data, destination[dst_ix],
-                               height, width, height, width, 0, 0, 1, 1, False, False)
+                if field["mode"] == jpg:
+                    imdecode_c(
+                        image_data,
+                        destination[dst_ix],
+                        height,
+                        width,
+                        height,
+                        width,
+                        0,
+                        0,
+                        1,
+                        1,
+                        False,
+                        False,
+                    )
                 else:
                     my_memcpy(image_data, destination[dst_ix])
 
-            return destination[:len(batch_indices)]
+            return destination[: len(batch_indices)]
 
         decode.is_parallel = True
         return decode
@@ -144,30 +174,34 @@ class ResizedCropRGBImageDecoder(SimpleRGBImageDecoder, metaclass=ABCMeta):
 
     It supports both variable and constant resolution datasets.
     """
+
     def __init__(self, output_size):
         super().__init__()
         self.output_size = output_size
 
-    def declare_state_and_memory(self, previous_state: State) -> Tuple[State, AllocationQuery]:
-        widths = self.metadata['width']
-        heights = self.metadata['height']
+    def declare_state_and_memory(
+        self, previous_state: State
+    ) -> Tuple[State, AllocationQuery]:
+        widths = self.metadata["width"]
+        heights = self.metadata["height"]
         # We convert to uint64 to avoid overflows
         self.max_width = np.uint64(widths.max())
         self.max_height = np.uint64(heights.max())
         output_shape = (self.output_size[0], self.output_size[1], 3)
-        my_dtype = np.dtype('<u1')
+        my_dtype = np.dtype("<u1")
 
         return (
-            replace(previous_state, jit_mode=True,
-                    shape=output_shape, dtype=my_dtype),
-            (AllocationQuery(output_shape, my_dtype),
-            AllocationQuery((self.max_height * self.max_width * np.uint64(3),), my_dtype),
-            )
+            replace(previous_state, jit_mode=True, shape=output_shape, dtype=my_dtype),
+            (
+                AllocationQuery(output_shape, my_dtype),
+                AllocationQuery(
+                    (self.max_height * self.max_width * np.uint64(3),), my_dtype
+                ),
+            ),
         )
 
     def generate_code(self) -> Callable:
-
-        jpg = IMAGE_MODES['jpg']
+        jpg = IMAGE_MODES["jpg"]
 
         mem_read = self.memory_read
         my_range = Compiler.get_iterator()
@@ -187,14 +221,26 @@ class ResizedCropRGBImageDecoder(SimpleRGBImageDecoder, metaclass=ABCMeta):
             for dst_ix in my_range(len(batch_indices)):
                 source_ix = batch_indices[dst_ix]
                 field = metadata[source_ix]
-                image_data = mem_read(field['data_ptr'], storage_state)
-                height = np.uint32(field['height'])
-                width = np.uint32(field['width'])
+                image_data = mem_read(field["data_ptr"], storage_state)
+                height = np.uint32(field["height"])
+                width = np.uint32(field["width"])
 
-                if field['mode'] == jpg:
+                if field["mode"] == jpg:
                     temp_buffer = temp_storage[dst_ix]
-                    imdecode_c(image_data, temp_buffer,
-                               height, width, height, width, 0, 0, 1, 1, False, False)
+                    imdecode_c(
+                        image_data,
+                        temp_buffer,
+                        height,
+                        width,
+                        height,
+                        width,
+                        0,
+                        0,
+                        1,
+                        1,
+                        False,
+                        False,
+                    )
                     selected_size = 3 * height * width
                     temp_buffer = temp_buffer.reshape(-1)[:selected_size]
                     temp_buffer = temp_buffer.reshape(height, width, 3)
@@ -204,10 +250,10 @@ class ResizedCropRGBImageDecoder(SimpleRGBImageDecoder, metaclass=ABCMeta):
 
                 i, j, h, w = get_crop_c(height, width, scale, ratio)
 
-                resize_crop_c(temp_buffer, i, i + h, j, j + w,
-                              destination[dst_ix])
+                resize_crop_c(temp_buffer, i, i + h, j, j + w, destination[dst_ix])
 
-            return destination[:len(batch_indices)]
+            return destination[: len(batch_indices)]
+
         decode.is_parallel = True
         return decode
 
@@ -231,7 +277,8 @@ class RandomResizedCropRGBImageDecoder(ResizedCropRGBImageDecoder):
     ratio : Tuple[float]
         The range of potential aspect ratios that can be randomly sampled
     """
-    def __init__(self, output_size, scale=(0.08, 1.0), ratio=(0.75, 4/3)):
+
+    def __init__(self, output_size, scale=(0.08, 1.0), ratio=(0.75, 4 / 3)):
         super().__init__(output_size)
         self.scale = scale
         self.ratio = ratio
@@ -254,6 +301,7 @@ class CenterCropRGBImageDecoder(ResizedCropRGBImageDecoder):
     ratio: float
         ratio of (crop size) / (min side length)
     """
+
     # output size: resize crop size -> output size
     def __init__(self, output_size, ratio):
         super().__init__(output_size)
@@ -263,6 +311,113 @@ class CenterCropRGBImageDecoder(ResizedCropRGBImageDecoder):
     @property
     def get_crop_generator(self):
         return get_center_crop
+
+class CropRGBImageDecoder(SimpleRGBImageDecoder, metaclass=ABCMeta):
+    """Abstract decoder for :class:`~ffcv.fields.RGBImageField` that performs a
+    random crop, resizing only as necessary.
+
+    It supports both variable and constant resolution datasets.
+    """
+
+    def __init__(self, output_size):
+        super().__init__()
+        self.output_size = output_size
+
+    def declare_state_and_memory(
+        self, previous_state: State
+    ) -> Tuple[State, AllocationQuery]:
+        widths = self.metadata["width"]
+        heights = self.metadata["height"]
+        # We convert to uint64 to avoid overflows
+        self.max_width = np.uint64(widths.max())
+        self.max_height = np.uint64(heights.max())
+        output_shape = (self.output_size[0], self.output_size[1], 3)
+        my_dtype = np.dtype("<u1")
+
+        return (
+            replace(previous_state, jit_mode=True, shape=output_shape, dtype=my_dtype),
+            (
+                AllocationQuery(output_shape, my_dtype),
+                AllocationQuery(
+                    (self.max_height * self.max_width * np.uint64(3),), my_dtype
+                ),
+            ),
+        )
+
+    def generate_code(self) -> Callable:
+        jpg = IMAGE_MODES["jpg"]
+
+        mem_read = self.memory_read
+        my_range = Compiler.get_iterator()
+        imdecode_c = Compiler.compile(imdecode)
+        resize_crop_c = Compiler.compile(resize_crop)
+        get_crop_c = Compiler.compile(self.get_crop_generator)
+        h_out, w_out = self.output_size
+
+        def decode(batch_indices, my_storage, metadata, storage_state):
+            destination, temp_storage = my_storage
+            for dst_ix in my_range(len(batch_indices)):
+                source_ix = batch_indices[dst_ix]
+                field = metadata[source_ix]
+                image_data = mem_read(field["data_ptr"], storage_state)
+                height = np.uint32(field["height"])
+                width = np.uint32(field["width"])
+
+                if field["mode"] == jpg:
+                    temp_buffer = temp_storage[dst_ix]
+                    imdecode_c(
+                        image_data,
+                        temp_buffer,
+                        height,
+                        width,
+                        height,
+                        width,
+                        0,
+                        0,
+                        1,
+                        1,
+                        False,
+                        False,
+                    )
+                    selected_size = 3 * height * width
+                    temp_buffer = temp_buffer.reshape(-1)[:selected_size]
+                    temp_buffer = temp_buffer.reshape(height, width, 3)
+
+                else:
+                    temp_buffer = image_data.reshape(height, width, 3)
+                i, j, h, w = get_crop_c(height, width, h_out, w_out)
+                # print(height,width,h_out,w_out, i,j,h,w) debugging ...
+                resize_crop_c(temp_buffer, i, i + h, j, j + w, destination[dst_ix])
+
+            return destination[: len(batch_indices)]
+
+        decode.is_parallel = True
+        return decode
+
+    @property
+    @abstractmethod
+    def get_crop_generator():
+        raise NotImplementedError
+
+class RandomCropRGBImageDecoder(CropRGBImageDecoder):
+    """Decoder for :class:`~ffcv.fields.RGBImageField` that performs a
+    random crop, resizing only as necessary.
+
+    It supports both variable and constant resolution datasets.
+
+    Parameters
+    ----------
+    output_size : Tuple[int]
+        The desired resized resolution of the images
+    """
+
+    def __init__(self, output_size):
+        super().__init__(output_size)
+        self.output_size = output_size
+
+    @property
+    def get_crop_generator(self):
+        return get_random_crop_alt 
 
 
 class RGBImageField(Field):
@@ -289,9 +444,15 @@ class RGBImageField(Field):
         Ignored unless ``write_mode='proportion'``; in the latter case it is the
         probability with which image is JPEG-compressed, by default 0.5.
     """
-    def __init__(self, write_mode='raw', max_resolution: int = None,
-                 smart_threshold: int = None, jpeg_quality: int = 90,
-                 compress_probability: float = 0.5) -> None:
+
+    def __init__(
+        self,
+        write_mode="raw",
+        max_resolution: int = None,
+        smart_threshold: int = None,
+        jpeg_quality: int = 90,
+        compress_probability: float = 0.5,
+    ) -> None:
         self.write_mode = write_mode
         self.smart_threshold = smart_threshold
         self.max_resolution = max_resolution
@@ -300,12 +461,14 @@ class RGBImageField(Field):
 
     @property
     def metadata_type(self) -> np.dtype:
-        return np.dtype([
-            ('mode', '<u1'),
-            ('width', '<u2'),
-            ('height', '<u2'),
-            ('data_ptr', '<u8'),
-        ])
+        return np.dtype(
+            [
+                ("mode", "<u1"),
+                ("width", "<u2"),
+                ("height", "<u2"),
+                ("data_ptr", "<u8"),
+            ]
+        )
 
     def get_decoder_class(self) -> Type[Operation]:
         return SimpleRGBImageDecoder
@@ -337,29 +500,31 @@ class RGBImageField(Field):
         write_mode = self.write_mode
         as_jpg = None
 
-        if write_mode == 'smart':
+        if write_mode == "smart":
             as_jpg = encode_jpeg(image, self.jpeg_quality)
-            write_mode = 'raw'
+            write_mode = "raw"
             if self.smart_threshold is not None:
                 if image.nbytes > self.smart_threshold:
-                    write_mode = 'jpg'
-        elif write_mode == 'proportion':
+                    write_mode = "jpg"
+        elif write_mode == "proportion":
             if np.random.rand() < self.proportion:
-                write_mode = 'jpg'
+                write_mode = "jpg"
             else:
-                write_mode = 'raw'
+                write_mode = "raw"
 
-        destination['mode'] = IMAGE_MODES[write_mode]
-        destination['height'], destination['width'] = image.shape[:2]
+        destination["mode"] = IMAGE_MODES[write_mode]
+        destination["height"], destination["width"] = image.shape[:2]
 
-        if write_mode == 'jpg':
+        if write_mode == "jpg":
             if as_jpg is None:
                 as_jpg = encode_jpeg(image, self.jpeg_quality)
-            destination['data_ptr'], storage = malloc(as_jpg.nbytes)
+            destination["data_ptr"], storage = malloc(as_jpg.nbytes)
             storage[:] = as_jpg
-        elif write_mode == 'raw':
-            image_bytes = np.ascontiguousarray(image).view('<u1').reshape(-1)
-            destination['data_ptr'], storage = malloc(image.nbytes)
+        elif write_mode == "raw":
+            image_bytes = np.ascontiguousarray(image).view("<u1").reshape(-1)
+            destination["data_ptr"], storage = malloc(image.nbytes)
             storage[:] = image_bytes
         else:
             raise ValueError(f"Unsupported write mode {self.write_mode}")
+
+
